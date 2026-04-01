@@ -221,9 +221,6 @@ run_with_backoff() {
     # If the user explicitly quit, don't retry.
     local failures=0
     while true; do
-        local start_time
-        start_time=$(date +%s)
-
         "$@"
         local exit_code=$?
 
@@ -233,23 +230,29 @@ run_with_backoff() {
             break
         fi
 
-        local elapsed=$(( $(date +%s) - start_time ))
-
+        # Clean exit
         if [[ $exit_code -eq 0 ]]; then
-            break  # clean exit
+            break
         fi
 
-        if [[ $elapsed -lt 5 ]]; then
-            failures=$((failures + 1))
-            if [[ $failures -ge 3 ]]; then
-                dialog 'display dialog "Ren STT failed to start.\n\nCheck Accessibility permissions in System Settings > Privacy & Security > Accessibility.\n\nLogs: ~/.config/ren-stt/" buttons {"Open Settings", "OK"} default button "OK" with title "Ren STT" with icon caution'
-                open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-                exit 1
+        # Exit code 2 = accessibility not granted — don't retry, just wait for user
+        if [[ $exit_code -eq 2 ]]; then
+            dialog 'display dialog "Ren STT needs Accessibility permission.\n\nSystem Settings has been opened. Add RenSTT, then click Retry." buttons {"Quit", "Retry"} default button "Retry" with title "Ren STT" with icon caution'
+            local btn="$?"
+            # osascript returns 1 if user clicked first button (Quit)
+            if [[ $btn -ne 0 ]]; then
+                break
             fi
-            sleep 5
-        else
-            failures=0  # ran long enough — reset
+            continue  # retry immediately after user says Retry
         fi
+
+        # Other failures — backoff
+        failures=$((failures + 1))
+        if [[ $failures -ge 3 ]]; then
+            dialog 'display dialog "Ren STT failed to start after multiple attempts.\n\nCheck logs at ~/.config/ren-stt/" buttons {"OK"} default button "OK" with title "Ren STT" with icon stop'
+            exit 1
+        fi
+        sleep 5
     done
 }
 

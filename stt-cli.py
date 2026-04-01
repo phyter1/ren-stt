@@ -150,17 +150,26 @@ def hide_indicator():
 def check_accessibility():
     """Check if we have Accessibility permissions. If not, prompt and exit cleanly."""
     try:
-        import Cocoa
-        trusted = Cocoa.AXIsProcessTrustedWithOptions({
-            "AXTrustedCheckOptionPrompt": True
-        })
-        if not trusted:
-            print("Accessibility permission required. macOS should have opened System Settings.")
-            print("Add this app, then relaunch.")
-            sys.exit(0)  # exit cleanly — don't crash-loop
-    except ImportError:
-        # No PyObjC — fall back to checking via pynput (will print warning if untrusted)
-        pass
+        import ctypes
+        import ctypes.util
+
+        # Load ApplicationServices framework
+        lib = ctypes.cdll.LoadLibrary(
+            ctypes.util.find_library("ApplicationServices")
+        )
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+
+        if not lib.AXIsProcessTrusted():
+            print("Accessibility permission required.")
+            print("Add this app in System Settings > Privacy & Security > Accessibility, then relaunch.")
+            # Try to open the settings pane
+            subprocess.Popen(
+                ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            sys.exit(2)  # non-zero so backoff catches it, but distinct from crash
+    except Exception as e:
+        print(f"Warning: could not check accessibility: {e}")
 
 
 def check_deps():
