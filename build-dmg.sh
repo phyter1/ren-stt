@@ -37,12 +37,14 @@ cp "$REPO_DIR/app/Info.plist" "$CONTENTS/Info.plist"
 cp "$REPO_DIR/app/launcher.sh" "$MACOS/ren-stt"
 chmod +x "$MACOS/ren-stt"
 
-# Python sources
+# Python sources (client + server)
 cp "$REPO_DIR/stt-cli.py" "$RESOURCES/"
 cp "$REPO_DIR/stt-indicator.py" "$RESOURCES/"
 cp "$REPO_DIR/stt-menubar.py" "$RESOURCES/"
+cp "$REPO_DIR/stt-server.py" "$RESOURCES/"
 cp "$REPO_DIR/config.py" "$RESOURCES/"
 cp "$REPO_DIR/requirements-client.txt" "$RESOURCES/"
+cp "$REPO_DIR/requirements-server.txt" "$RESOURCES/"
 
 info "RenSTT.app built at $APP_DIR"
 
