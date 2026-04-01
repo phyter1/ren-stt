@@ -58,9 +58,8 @@ SOUND_ERROR = "/System/Library/Sounds/Basso.aiff"
 
 
 def eat_space():
-    """No-op. Option+Space inserts a non-breaking space but deleting it
-    is too risky — it eats real text if timing is off. The nbsp is
-    invisible and harmless in most contexts."""
+    """No-op. CGEventTap suppresses the keystroke before it reaches the app.
+    Falls through harmlessly if pynput fallback is active."""
     pass
 
 
@@ -376,8 +375,239 @@ def _normalize_key(key):
     return _MODIFIER_NORMALIZE.get(key, key)
 
 
+def _parse_hotkey_keycodes(hotkey_combo):
+    """Parse hotkey string into (modifier_mask, keycode) for CGEventTap."""
+    import Quartz
+    parts = hotkey_combo.lower().split("+")
+
+    modifier_map = {
+        "option": Quartz.kCGEventFlagMaskAlternate,
+        "alt": Quartz.kCGEventFlagMaskAlternate,
+        "cmd": Quartz.kCGEventFlagMaskCommand,
+        "ctrl": Quartz.kCGEventFlagMaskControl,
+        "shift": Quartz.kCGEventFlagMaskShift,
+    }
+    keycode_map = {
+        "space": 49, "return": 36, "tab": 48, "escape": 53,
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97,
+        "f7": 98, "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111,
+    }
+
+    mask = 0
+    for part in parts[:-1]:
+        if part in modifier_map:
+            mask |= modifier_map[part]
+
+    trigger = parts[-1]
+    keycode = keycode_map.get(trigger)
+    if keycode is None and len(trigger) == 1:
+        # Single letter — get keycode (approximate, US keyboard)
+        letter_codes = "asdfhgzxcvbqwertyuiop[]\\-=`1234567890"
+        # macOS keycodes for letters (US layout)
+        _letter_keycodes = {
+            'a': 0, 's': 1, 'd': 2, 'f': 3, 'h': 4, 'g': 5, 'z': 6, 'x': 7,
+            'c': 8, 'v': 9, 'b': 11, 'q': 12, 'w': 13, 'e': 14, 'r': 15,
+            'y': 16, 't': 17, 'o': 31, 'u': 32, 'i': 34, 'p': 35, 'l': 37,
+            'j': 38, 'k': 40, 'n': 45, 'm': 46,
+        }
+        keycode = _letter_keycodes.get(trigger)
+
+    return mask, keycode
+
+
+def run_toggle(hotkey_combo):
+    """Toggle mode using CGEventTap — suppresses hotkey from reaching the active app."""
+    try:
+        return _run_toggle_cgeventtap(hotkey_combo)
+    except Exception as e:
+        log.warning("CGEventTap failed (%s), falling back to pynput", e)
+        return _run_toggle_pynput(hotkey_combo)
+
+
 def run_push_to_talk(hotkey_combo):
-    """Push-to-talk mode: hold hotkey to record, release to transcribe."""
+    """Push-to-talk mode using CGEventTap."""
+    try:
+        return _run_ptt_cgeventtap(hotkey_combo)
+    except Exception as e:
+        log.warning("CGEventTap failed (%s), falling back to pynput", e)
+        return _run_ptt_pynput(hotkey_combo)
+
+
+def _run_toggle_cgeventtap(hotkey_combo):
+    """Toggle mode with CGEventTap — intercepts and suppresses the hotkey."""
+    import Quartz
+
+    modifier_mask, trigger_keycode = _parse_hotkey_keycodes(hotkey_combo)
+    processing = False
+    ESC_KEYCODE = 53
+
+    def callback(proxy, event_type, event, refcon):
+        nonlocal processing
+        if event_type not in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
+            return event
+
+        flags = Quartz.CGEventGetFlags(event)
+        keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+
+        # Escape cancels recording
+        if keycode == ESC_KEYCODE and event_type == Quartz.kCGEventKeyDown and recording:
+            cancel_recording()
+            return None  # suppress
+
+        # Check if our hotkey combo matches
+        hotkey_match = (keycode == trigger_keycode and
+                       (flags & modifier_mask) == modifier_mask)
+
+        if not hotkey_match:
+            return event  # pass through
+
+        if event_type == Quartz.kCGEventKeyDown:
+            if not recording and not processing:
+                start_recording()
+            elif recording and not processing:
+                processing = True
+                def do_transcribe():
+                    nonlocal processing
+                    try:
+                        stop_recording_and_transcribe()
+                    finally:
+                        processing = False
+                threading.Thread(target=do_transcribe, daemon=True).start()
+            return None  # suppress — no nbsp inserted
+
+        if event_type == Quartz.kCGEventKeyUp:
+            return None  # suppress key-up too
+
+        return event
+
+    tap = Quartz.CGEventTapCreate(
+        Quartz.kCGSessionEventTap,
+        Quartz.kCGHeadInsertEventTap,
+        Quartz.kCGEventTapOptionDefault,
+        Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown) | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp),
+        callback,
+        None,
+    )
+
+    if not tap:
+        raise RuntimeError("Failed to create CGEventTap")
+
+    log.info("CGEventTap active — hotkey suppressed from reaching apps")
+    source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+    loop = Quartz.CFRunLoopGetCurrent()
+    Quartz.CFRunLoopAddSource(loop, source, Quartz.kCFRunLoopCommonModes)
+    Quartz.CGEventTapEnable(tap, True)
+    Quartz.CFRunLoopRun()
+
+
+def _run_ptt_cgeventtap(hotkey_combo):
+    """Push-to-talk mode with CGEventTap."""
+    import Quartz
+
+    modifier_mask, trigger_keycode = _parse_hotkey_keycodes(hotkey_combo)
+    processing = False
+    ESC_KEYCODE = 53
+
+    def callback(proxy, event_type, event, refcon):
+        nonlocal processing
+        if event_type not in (Quartz.kCGEventKeyDown, Quartz.kCGEventKeyUp):
+            return event
+
+        flags = Quartz.CGEventGetFlags(event)
+        keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+
+        if keycode == ESC_KEYCODE and event_type == Quartz.kCGEventKeyDown and recording:
+            cancel_recording()
+            return None
+
+        hotkey_match = (keycode == trigger_keycode and
+                       (flags & modifier_mask) == modifier_mask)
+
+        if not hotkey_match:
+            return event
+
+        if event_type == Quartz.kCGEventKeyDown:
+            if not recording and not processing:
+                start_recording()
+            return None
+
+        if event_type == Quartz.kCGEventKeyUp:
+            if recording and not processing:
+                processing = True
+                def do_transcribe():
+                    nonlocal processing
+                    try:
+                        stop_recording_and_transcribe()
+                    finally:
+                        processing = False
+                threading.Thread(target=do_transcribe, daemon=True).start()
+            return None
+
+        return event
+
+    tap = Quartz.CGEventTapCreate(
+        Quartz.kCGSessionEventTap,
+        Quartz.kCGHeadInsertEventTap,
+        Quartz.kCGEventTapOptionDefault,
+        Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown) | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp),
+        callback,
+        None,
+    )
+
+    if not tap:
+        raise RuntimeError("Failed to create CGEventTap")
+
+    log.info("CGEventTap active (push-to-talk) — hotkey suppressed")
+    source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+    loop = Quartz.CFRunLoopGetCurrent()
+    Quartz.CFRunLoopAddSource(loop, source, Quartz.kCFRunLoopCommonModes)
+    Quartz.CGEventTapEnable(tap, True)
+    Quartz.CFRunLoopRun()
+
+
+# ── pynput fallback (non-macOS or Quartz unavailable) ──────────────
+
+def _run_toggle_pynput(hotkey_combo):
+    from pynput import keyboard
+
+    modifiers_needed, trigger_key = parse_hotkey(hotkey_combo)
+    pressed_modifiers = set()
+    processing = False
+
+    def on_press(key):
+        nonlocal pressed_modifiers, processing
+        nkey = _normalize_key(key)
+        if nkey == keyboard.Key.esc and recording and not processing:
+            cancel_recording()
+            return
+
+        if nkey in modifiers_needed:
+            pressed_modifiers.add(nkey)
+
+        if nkey == trigger_key and modifiers_needed.issubset(pressed_modifiers):
+            if not recording and not processing:
+                start_recording()
+            elif recording and not processing:
+                processing = True
+                def do_transcribe():
+                    nonlocal processing
+                    try:
+                        stop_recording_and_transcribe()
+                    finally:
+                        processing = False
+                threading.Thread(target=do_transcribe, daemon=True).start()
+
+    def on_release(key):
+        nonlocal pressed_modifiers
+        nkey = _normalize_key(key)
+        if nkey in modifiers_needed:
+            pressed_modifiers.discard(nkey)
+
+    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
+
+
+def _run_ptt_pynput(hotkey_combo):
     from pynput import keyboard
 
     modifiers_needed, trigger_key = parse_hotkey(hotkey_combo)
@@ -413,47 +643,6 @@ def run_push_to_talk(hotkey_combo):
                 finally:
                     processing = False
             threading.Thread(target=do_transcribe, daemon=True).start()
-
-    with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-        listener.join()
-
-
-def run_toggle(hotkey_combo):
-    """Toggle mode: press hotkey to start, press again to stop and transcribe."""
-    from pynput import keyboard
-
-    modifiers_needed, trigger_key = parse_hotkey(hotkey_combo)
-    pressed_modifiers = set()
-    processing = False
-
-    def on_press(key):
-        nonlocal pressed_modifiers, processing
-        nkey = _normalize_key(key)
-        if nkey == keyboard.Key.esc and recording and not processing:
-            cancel_recording()
-            return
-
-        if nkey in modifiers_needed:
-            pressed_modifiers.add(nkey)
-
-        if nkey == trigger_key and modifiers_needed.issubset(pressed_modifiers):
-            if not recording and not processing:
-                start_recording()
-            elif recording and not processing:
-                processing = True
-                def do_transcribe():
-                    nonlocal processing
-                    try:
-                        stop_recording_and_transcribe()
-                    finally:
-                        processing = False
-                threading.Thread(target=do_transcribe, daemon=True).start()
-
-    def on_release(key):
-        nonlocal pressed_modifiers
-        nkey = _normalize_key(key)
-        if nkey in modifiers_needed:
-            pressed_modifiers.discard(nkey)
 
     with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
         listener.join()
