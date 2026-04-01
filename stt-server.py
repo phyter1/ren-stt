@@ -47,46 +47,75 @@ import numpy as np
 import librosa
 import wave
 
+# ── Punctuation model ──────────────────────────────────────────────
+
+_punct_model = None
+
+
+def load_punctuation_model():
+    """Load the ONNX punctuation/capitalization/segmentation model."""
+    global _punct_model
+    try:
+        from punctuators.models.punc_cap_seg_model import PunctCapSegConfigONNX, PunctCapSegModelONNX
+        from huggingface_hub import snapshot_download
+        import warnings
+        warnings.filterwarnings("ignore", message="Specified provider.*CUDA")
+
+        print("Loading punctuation model...", flush=True)
+        path = snapshot_download("1-800-BAD-CODE/punct_cap_seg_47_language")
+        cfg = PunctCapSegConfigONNX(
+            directory=path,
+            spe_filename="spe_unigram_64k_lowercase_47lang.model",
+            model_filename="punct_cap_seg_47lang.onnx",
+            config_filename="config.yaml",
+        )
+        _punct_model = PunctCapSegModelONNX(cfg)
+        print("Punctuation model ready.", flush=True)
+    except Exception as e:
+        print(f"Punctuation model not available ({e}). Using regex fallback.", flush=True)
+
 
 def clean_transcript(text):
-    """Remove filler words and fix capitalization. Parakeet handles punctuation."""
+    """Clean transcription: remove fillers, add punctuation + capitalization."""
     if not text:
         return text
 
-    # Remove filler words/sounds
+    # Step 1: Remove filler words
     fillers = [
         r"\byou know\b", r"\bi mean\b", r"\bkind of\b", r"\bsort of\b",
         r"\b(uh|uhh|uhm|um|umm|hmm|hm|er|ah)\b",
-        r"\b(uh|um)'s\b",  # "uh's" artifacts
+        r"\b(uh|um)'s\b",
     ]
     for f in fillers:
         text = re.sub(f, "", text, flags=re.IGNORECASE)
-
-    # Collapse whitespace and fix double punctuation from removal
     text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"\s+([.,!?])", r"\1", text)  # remove space before punct
-    text = re.sub(r"([.,!?])\1+", r"\1", text)  # dedupe punct
 
-    # Capitalize first letter and after sentence-ending punctuation
+    if not text:
+        return text
+
+    # Step 2: Punctuation model (if available)
+    if _punct_model is not None:
+        try:
+            results = _punct_model.infer([text.lower()])
+            if results and results[0]:
+                return " ".join(results[0])
+        except Exception:
+            pass  # fall through to regex
+
+    # Step 3: Regex fallback
+    text = re.sub(r"\s+([.,!?])", r"\1", text)
+    text = re.sub(r"([.,!?])\1+", r"\1", text)
     if text:
         text = text[0].upper() + text[1:]
         text = re.sub(r"([.!?]\s+)(\w)", lambda m: m.group(1) + m.group(2).upper(), text)
-
-    # Add period if missing
-    if text and text[-1] not in ".!?":
-        text += "."
-
-    # Capitalize standalone "i"
     text = re.sub(r"\bi\b", "I", text)
-    # Fix "I" at start that might have been lowered
     if text:
         text = text[0].upper() + text[1:]
-
-    # Question detection — if starts with a question word, use ?
-    q_words = r"^(what|how|where|when|why|who|whom|whose|which|does|do|did|is|are|was|were|can|could|would|will|shall|should|has|have|had|may|might|isn't|aren't|won't|wouldn't|couldn't|shouldn't|don't|doesn't|didn't)\b"
+    if text and text[-1] not in ".!?":
+        text += "."
+    q_words = r"^(what|how|where|when|why|who|whom|whose|which|does|do|did|is|are|was|were|can|could|would|will|shall|should|has|have|had|may|might)\b"
     if re.match(q_words, text, re.IGNORECASE) and text.endswith("."):
         text = text[:-1] + "?"
-
     return text
 
 # Globals — set during init
@@ -127,6 +156,9 @@ def load_model(model_key):
     except Exception as e:
         print(f"Warmup note: {e}", flush=True)
     print("Ready.", flush=True)
+
+    # Load punctuation model alongside STT
+    load_punctuation_model()
 
 
 class STTHandler(BaseHTTPRequestHandler):
