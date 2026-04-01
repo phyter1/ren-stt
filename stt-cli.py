@@ -58,12 +58,10 @@ SOUND_ERROR = "/System/Library/Sounds/Basso.aiff"
 
 
 def eat_space():
-    """Delete the non-breaking space that Option+Space inserts on macOS."""
-    subprocess.Popen(
-        ["osascript", "-e",
-         'tell application "System Events" to key code 51'],  # 51 = backspace
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    """No-op. Option+Space inserts a non-breaking space but deleting it
+    is too risky — it eats real text if timing is off. The nbsp is
+    invisible and harmless in most contexts."""
+    pass
 
 
 _server_url = "http://localhost:8222"
@@ -91,47 +89,23 @@ def play_sound(path):
     )
 
 
+_menubar_delegate = None
+
+
 def menubar_send(state):
-    """Send a state update to the menu bar process."""
-    if menubar_process and menubar_process.stdin:
-        try:
-            menubar_process.stdin.write(f"{state}\n".encode())
-            menubar_process.stdin.flush()
-        except Exception:
-            pass
-
-
-def start_menubar():
-    """Launch the menu bar icon."""
-    global menubar_process
+    """Send a state update to the in-process menu bar."""
+    if _menubar_delegate is None:
+        return
     try:
-        menubar_process = subprocess.Popen(
-            [PYTHON_EXE, os.path.join(SCRIPT_DIR, "stt-menubar.py")],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        from PyObjCTools import AppHelper
+        if state == "recording":
+            AppHelper.callAfter(_menubar_delegate.set_recording)
+        elif state == "transcribing":
+            AppHelper.callAfter(_menubar_delegate.set_transcribing)
+        elif state == "idle":
+            AppHelper.callAfter(_menubar_delegate.set_idle)
     except Exception:
-        menubar_process = None
-
-
-def stop_menubar():
-    """Close the menu bar icon."""
-    global menubar_process
-    if menubar_process:
-        try:
-            menubar_process.stdin.close()
-        except Exception:
-            pass
-        try:
-            menubar_process.terminate()
-            menubar_process.wait(timeout=2)
-        except Exception:
-            try:
-                menubar_process.kill()
-            except Exception:
-                pass
-        menubar_process = None
+        pass
 
 
 def show_indicator():
@@ -170,25 +144,33 @@ def hide_indicator():
         indicator_process = None
 
 
-def check_accessibility():
-    """Check if we have Accessibility permissions. If not, prompt and exit cleanly."""
-    try:
-        import ctypes, ctypes.util
-        lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("ApplicationServices"))
-        lib.AXIsProcessTrusted.restype = ctypes.c_bool
-        trusted = lib.AXIsProcessTrusted()
-        log.info("AXIsProcessTrusted: %s", trusted)
+def _get_ax_lib():
+    """Load ApplicationServices and return (lib, is_trusted_func)."""
+    import ctypes, ctypes.util
+    lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("ApplicationServices"))
+    lib.AXIsProcessTrusted.restype = ctypes.c_bool
+    return lib
 
-        if not trusted:
-            # Try to open settings for the user
-            log.info("Not trusted — opening Accessibility settings")
-            subprocess.Popen(
-                ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            sys.exit(2)
-    except Exception as e:
-        log.warning("Could not check accessibility: %s", e)
+
+def is_accessible():
+    """Check if we have Accessibility permissions."""
+    try:
+        return _get_ax_lib().AXIsProcessTrusted()
+    except Exception:
+        return True  # assume yes if we can't check
+
+
+def check_accessibility():
+    """Check Accessibility. If not granted, returns False (caller handles waiting)."""
+    trusted = is_accessible()
+    log.info("AXIsProcessTrusted: %s", trusted)
+    if not trusted:
+        log.info("Opening Accessibility settings...")
+        subprocess.Popen(
+            ["open", "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    return trusted
 
 
 def check_deps():
@@ -368,6 +350,24 @@ def parse_hotkey(hotkey_combo):
     return modifiers_needed, trigger_key
 
 
+# macOS pynput reports alt_l/alt_r/cmd_l/cmd_r etc. for physical keys,
+# but Key.alt/Key.cmd for the generic versions. Normalize so matching works.
+def _normalize_key(key):
+    from pynput import keyboard
+    _MODIFIER_NORMALIZE = {
+        keyboard.Key.alt_l: keyboard.Key.alt,
+        keyboard.Key.alt_r: keyboard.Key.alt,
+        keyboard.Key.alt_gr: keyboard.Key.alt,
+        keyboard.Key.cmd_l: keyboard.Key.cmd,
+        keyboard.Key.cmd_r: keyboard.Key.cmd,
+        keyboard.Key.ctrl_l: keyboard.Key.ctrl,
+        keyboard.Key.ctrl_r: keyboard.Key.ctrl,
+        keyboard.Key.shift_l: keyboard.Key.shift,
+        keyboard.Key.shift_r: keyboard.Key.shift,
+    }
+    return _MODIFIER_NORMALIZE.get(key, key)
+
+
 def run_push_to_talk(hotkey_combo):
     """Push-to-talk mode: hold hotkey to record, release to transcribe."""
     from pynput import keyboard
@@ -378,23 +378,25 @@ def run_push_to_talk(hotkey_combo):
 
     def on_press(key):
         nonlocal pressed_modifiers
-        if key == keyboard.Key.esc and recording:
+        nkey = _normalize_key(key)
+        if nkey == keyboard.Key.esc and recording:
             cancel_recording()
             return
 
-        if key in modifiers_needed:
-            pressed_modifiers.add(key)
+        if nkey in modifiers_needed:
+            pressed_modifiers.add(nkey)
 
-        if key == trigger_key and modifiers_needed.issubset(pressed_modifiers):
+        if nkey == trigger_key and modifiers_needed.issubset(pressed_modifiers):
             if not recording and not processing:
                 start_recording()
 
     def on_release(key):
         nonlocal pressed_modifiers, processing
-        if key in modifiers_needed:
-            pressed_modifiers.discard(key)
+        nkey = _normalize_key(key)
+        if nkey in modifiers_needed:
+            pressed_modifiers.discard(nkey)
 
-        if key == trigger_key and recording and not processing:
+        if nkey == trigger_key and recording and not processing:
             processing = True
             def do_transcribe():
                 nonlocal processing
@@ -418,14 +420,15 @@ def run_toggle(hotkey_combo):
 
     def on_press(key):
         nonlocal pressed_modifiers, processing
-        if key == keyboard.Key.esc and recording and not processing:
+        nkey = _normalize_key(key)
+        if nkey == keyboard.Key.esc and recording and not processing:
             cancel_recording()
             return
 
-        if key in modifiers_needed:
-            pressed_modifiers.add(key)
+        if nkey in modifiers_needed:
+            pressed_modifiers.add(nkey)
 
-        if key == trigger_key and modifiers_needed.issubset(pressed_modifiers):
+        if nkey == trigger_key and modifiers_needed.issubset(pressed_modifiers):
             if not recording and not processing:
                 start_recording()
             elif recording and not processing:
@@ -440,11 +443,188 @@ def run_toggle(hotkey_combo):
 
     def on_release(key):
         nonlocal pressed_modifiers
-        if key in modifiers_needed:
-            pressed_modifiers.discard(key)
+        nkey = _normalize_key(key)
+        if nkey in modifiers_needed:
+            pressed_modifiers.discard(nkey)
 
     with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
         listener.join()
+
+
+def _osascript(script):
+    """Run an osascript and return stdout."""
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _first_run_setup(cfg):
+    """First-run dialog: pick mode, configure server, install deps if needed."""
+    config_dir = os.path.expanduser("~/.config/ren-stt")
+    config_path = os.path.join(config_dir, "config.json")
+
+    # Already configured — skip
+    if os.path.exists(config_path):
+        conf = cfg.load()
+        if conf.get("install_mode"):
+            return conf
+
+    log.info("First-run setup starting")
+
+    # Pick mode
+    choice = _osascript('''
+        display dialog "Welcome to Ren STT!
+
+How would you like to use this machine?
+
+• Client — Hotkey + transcription (connects to a server)
+• Server — Hosts the speech-to-text model (Apple Silicon only)
+• Standalone — Both server + client on this machine" \
+            buttons {"Client", "Server", "Standalone"} \
+            default button "Standalone" \
+            with title "Ren STT Setup"
+        return button returned of result
+    ''')
+
+    if choice is None:
+        log.info("User cancelled setup")
+        sys.exit(0)
+
+    mode = {"Client": "client", "Server": "server", "Standalone": "standalone"}.get(choice, "client")
+    log.info("User selected mode: %s", mode)
+
+    # Client mode: ask for server URL
+    server_url = "http://localhost:8222"
+    if mode == "client":
+        url_result = _osascript('''
+            display dialog "Enter the STT server address:
+
+(e.g. macmini.local or 192.168.1.50)" \
+                default answer "" \
+                buttons {"Cancel", "OK"} default button "OK" \
+                with title "Ren STT — Server Address"
+            return text returned of result
+        ''')
+        if url_result is None:
+            sys.exit(0)
+        if url_result:
+            if not url_result.startswith("http"):
+                url_result = "http://" + url_result
+            if not any(c.isdigit() for c in url_result.split(":")[-1]):
+                url_result += ":8222"
+            server_url = url_result
+
+    # Server/Standalone: check Apple Silicon
+    if mode in ("server", "standalone"):
+        import platform
+        if platform.machine() != "arm64":
+            _osascript('''
+                display dialog "Server mode requires Apple Silicon (M1/M2/M3).
+
+This machine is not Apple Silicon. Choose Client mode instead." \
+                    buttons {"OK"} default button "OK" \
+                    with title "Ren STT" with icon stop
+            ''')
+            # Re-run setup
+            return _first_run_setup(cfg)
+
+    # Server/Standalone: install server deps into a venv
+    if mode in ("server", "standalone"):
+        _osascript('''
+            display dialog "Installing server dependencies (MLX + Parakeet).
+
+This only happens once and may take a minute." \
+                buttons {"OK"} default button "OK" \
+                with title "Ren STT Setup" giving up after 1
+        ''')
+        log.info("Setting up server venv...")
+        venv_dir = os.path.join(config_dir, "server-venv")
+        if not os.path.exists(venv_dir):
+            subprocess.run([sys.executable if not getattr(sys, 'frozen', False) else "python3",
+                           "-m", "venv", venv_dir], check=True)
+
+        venv_pip = os.path.join(venv_dir, "bin", "pip")
+        req_file = os.path.join(SCRIPT_DIR, "requirements-server.txt")
+        log.info("Installing server deps from %s", req_file)
+        result = subprocess.run([venv_pip, "install", "-q", "-r", req_file],
+                               capture_output=True, text=True)
+        if result.returncode != 0:
+            log.error("Server dep install failed: %s", result.stderr)
+            _osascript(f'''
+                display dialog "Failed to install server dependencies:
+
+{result.stderr[:200]}" \
+                    buttons {{"OK"}} default button "OK" \
+                    with title "Ren STT" with icon stop
+            ''')
+            sys.exit(1)
+        log.info("Server deps installed")
+
+    # Check sox for client/standalone
+    if mode in ("client", "standalone"):
+        import shutil
+        if not shutil.which("sox"):
+            _osascript('''
+                display dialog "Ren STT requires sox for audio recording.
+
+Install it with:
+  brew install sox
+
+Then relaunch Ren STT." \
+                    buttons {"OK"} default button "OK" \
+                    with title "Ren STT" with icon caution
+            ''')
+            sys.exit(1)
+
+    # Write config
+    os.makedirs(config_dir, exist_ok=True)
+    conf_data = {
+        "install_mode": mode,
+        "server": {"host": "0.0.0.0", "port": 8222},
+        "client": {
+            "server_url": server_url,
+            "hotkey": "option+space",
+            "mode": "toggle",
+            "sensitivity": 18,
+            "indicator": True,
+        },
+    }
+    cfg.save(conf_data)
+    log.info("Config saved: mode=%s server=%s", mode, server_url)
+
+    _osascript('display notification "Setup complete!" with title "Ren STT"')
+    return conf_data
+
+
+def _start_server(conf):
+    """Start the STT server from the server venv."""
+    config_dir = os.path.expanduser("~/.config/ren-stt")
+    venv_python = os.path.join(config_dir, "server-venv", "bin", "python3")
+    server_script = os.path.join(SCRIPT_DIR, "stt-server.py")
+    server_log = os.path.join(config_dir, "server.log")
+
+    if not os.path.exists(venv_python):
+        log.error("Server venv not found at %s", venv_python)
+        return None
+
+    log.info("Starting server: %s %s", venv_python, server_script)
+    proc = subprocess.Popen(
+        [venv_python, "-u", server_script],
+        stdout=open(server_log, "a"),
+        stderr=subprocess.STDOUT,
+        cwd=SCRIPT_DIR,
+    )
+    log.info("Server started (PID: %d)", proc.pid)
+
+    # Write PID for cleanup
+    with open(os.path.join(config_dir, "server.pid"), "w") as f:
+        f.write(str(proc.pid))
+
+    return proc
 
 
 def main():
@@ -458,10 +638,16 @@ def main():
 
     log.info("Importing config...")
     import config as cfg
-    log.info("Loading config...")
-    conf = cfg.load()
+
+    # First-run setup (mode picker, server dep install)
+    conf = _first_run_setup(cfg)
+    if conf is None:
+        log.info("Loading existing config...")
+        conf = cfg.load()
+
+    install_mode = conf.get("install_mode", "client")
     client = conf["client"]
-    log.info("Config loaded: server=%s hotkey=%s", client["server_url"], client["hotkey"])
+    log.info("Mode: %s, server=%s hotkey=%s", install_mode, client["server_url"], client["hotkey"])
 
     import argparse
     parser = argparse.ArgumentParser(description="Hotkey-triggered STT with auto-paste")
@@ -484,15 +670,49 @@ def main():
     use_indicator = not args.no_indicator
     indicator_sensitivity = args.sensitivity
 
+    # Server-only mode: just run the server, no hotkey listener
+    if install_mode == "server":
+        log.info("Server-only mode")
+        server_proc = _start_server(conf)
+        if server_proc:
+            # Run menubar to keep app alive and show status
+            try:
+                _run_menubar_loop(None, None, True)
+            except Exception:
+                server_proc.wait()
+        sys.exit(0)
+
+    # Client or Standalone: need sox + accessibility + server
     log.info("Checking deps...")
     check_deps()
     log.info("Checking accessibility...")
-    check_accessibility()
-    log.info("Checking server...")
+    _accessibility_ok = check_accessibility()
 
+    # Standalone: start the server first
+    _server_proc = None
+    if install_mode == "standalone":
+        log.info("Starting local server...")
+        _osascript('display notification "Loading speech model (first launch takes ~30s)..." with title "Ren STT"')
+        _server_proc = _start_server(conf)
+        # Wait for server to be ready
+        for i in range(60):
+            time.sleep(1)
+            if check_server():
+                log.info("Server ready after %ds", i + 1)
+                break
+        else:
+            log.error("Server didn't start in 60s")
+
+    log.info("Checking server...")
     if not check_server():
-        print(f"STT server not reachable at {get_server()}")
-        print("Start the server or check --server URL.")
+        log.error("STT server not reachable at %s", get_server())
+        _osascript(f'''
+            display dialog "Cannot reach STT server at {get_server()}.
+
+Make sure the server is running." \
+                buttons {{"OK"}} default button "OK" \
+                with title "Ren STT" with icon caution
+        ''')
         sys.exit(1)
 
     mode = "push-to-talk" if args.push_to_talk else "toggle"
@@ -509,23 +729,174 @@ def main():
     print("Escape to cancel a recording.")
     print("Ctrl+C to quit.\n")
 
-    # Subprocess-based UI (menubar/indicator) needs a real Python with deps.
-    # Skip in frozen mode — the main hotkey listener still works.
-    if not getattr(sys, 'frozen', False):
-        start_menubar()
+    hotkey_mode = "push-to-talk" if args.push_to_talk else "toggle"
+    hotkey_combo = args.hotkey
 
-    def shutdown(*_):
-        hide_indicator()
-        if not getattr(sys, 'frozen', False):
-            stop_menubar()
-        sys.exit(0)
+    # Run menu bar on the main thread (AppKit requires it).
+    # Hotkey listener starts inside the menubar loop once accessibility is confirmed.
+    try:
+        _run_menubar_loop(hotkey_combo, hotkey_mode, _accessibility_ok)
+    except Exception as e:
+        log.warning("Menu bar failed: %s — running without it", e)
+        if not _accessibility_ok:
+            # Can't do anything without accessibility and no menubar to poll
+            log.error("No menu bar and no accessibility — exiting")
+            sys.exit(2)
+        # Fall back to hotkey listener only
+        if hotkey_mode == "push-to-talk":
+            run_push_to_talk(hotkey_combo)
+        else:
+            run_toggle(hotkey_combo)
 
-    signal.signal(signal.SIGINT, shutdown)
 
-    if args.push_to_talk:
-        run_push_to_talk(args.hotkey)
+def _cleanup_server():
+    """Kill the server process if we started one."""
+    pid_file = os.path.expanduser("~/.config/ren-stt/server.pid")
+    if os.path.exists(pid_file):
+        try:
+            pid = int(open(pid_file).read().strip())
+            os.kill(pid, signal.SIGTERM)
+            log.info("Stopped server (PID: %d)", pid)
+        except (ProcessLookupError, ValueError):
+            pass
+        os.unlink(pid_file)
+
+
+def _run_menubar_loop(hotkey_combo, hotkey_mode, accessibility_ok):
+    """Set up and run the AppKit menu bar on the main thread."""
+    global _menubar_delegate
+
+    import AppKit
+    import objc
+    from PyObjCTools import AppHelper
+
+    class InlineMenuBar(AppKit.NSObject):
+        status_item = None
+        status_menu_item = None
+
+        def applicationDidFinishLaunching_(self, notification):
+            self.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(
+                AppKit.NSSquareStatusItemLength
+            )
+            self.set_idle()
+
+            menu = AppKit.NSMenu.alloc().init()
+
+            self.status_menu_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Ren STT — Listening", None, ""
+            )
+            self.status_menu_item.setEnabled_(False)
+            menu.addItem_(self.status_menu_item)
+            menu.addItem_(AppKit.NSMenuItem.separatorItem())
+
+            hotkey_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "⌥ Space to record", None, ""
+            )
+            hotkey_item.setEnabled_(False)
+            menu.addItem_(hotkey_item)
+
+            esc_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Esc to cancel", None, ""
+            )
+            esc_item.setEnabled_(False)
+            menu.addItem_(esc_item)
+
+            menu.addItem_(AppKit.NSMenuItem.separatorItem())
+
+            quit_item = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "Quit STT", "quit:", "q"
+            )
+            menu.addItem_(quit_item)
+            self.status_item.setMenu_(menu)
+
+        def _sf_symbol(self, name, color=None):
+            image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+            if image is None:
+                return None
+            if color:
+                config = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(14, 5)
+                image = image.imageWithSymbolConfiguration_(config)
+                tinted = image.copy()
+                tinted.lockFocus()
+                color.set()
+                rect = AppKit.NSMakeRect(0, 0, tinted.size().width, tinted.size().height)
+                AppKit.NSRectFillUsingOperation(rect, AppKit.NSCompositingOperationSourceAtop)
+                tinted.unlockFocus()
+                tinted.setTemplate_(False)
+                return tinted
+            else:
+                image.setTemplate_(True)
+                return image
+
+        def set_idle(self):
+            button = self.status_item.button()
+            image = self._sf_symbol("waveform")
+            if image:
+                button.setImage_(image)
+                button.setTitle_("")
+            else:
+                button.setTitle_("STT")
+            if self.status_menu_item:
+                self.status_menu_item.setTitle_("Ren STT — Listening")
+
+        def set_recording(self):
+            button = self.status_item.button()
+            image = self._sf_symbol("waveform", AppKit.NSColor.systemRedColor())
+            if image:
+                button.setImage_(image)
+                button.setTitle_("")
+            if self.status_menu_item:
+                self.status_menu_item.setTitle_("Ren STT — Recording...")
+
+        def set_transcribing(self):
+            button = self.status_item.button()
+            image = self._sf_symbol("waveform", AppKit.NSColor.systemOrangeColor())
+            if image:
+                button.setImage_(image)
+                button.setTitle_("")
+            if self.status_menu_item:
+                self.status_menu_item.setTitle_("Ren STT — Transcribing...")
+
+        @objc.IBAction
+        def quit_(self, sender=None):
+            hide_indicator()
+            _cleanup_server()
+            AppKit.NSApp.terminate_(self)
+
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+
+    _menubar_delegate = InlineMenuBar.alloc().init()
+    app.setDelegate_(_menubar_delegate)
+
+    def start_hotkey_listener():
+        if hotkey_combo is None:
+            return  # server-only mode, no hotkeys
+        log.info("Starting hotkey listener (%s, %s)", hotkey_mode, hotkey_combo)
+        def run_hotkeys():
+            if hotkey_mode == "push-to-talk":
+                run_push_to_talk(hotkey_combo)
+            else:
+                run_toggle(hotkey_combo)
+        threading.Thread(target=run_hotkeys, daemon=True).start()
+
+    if accessibility_ok:
+        start_hotkey_listener()
     else:
-        run_toggle(args.hotkey)
+        # AppKit run loop keeps the process alive. Poll in a background thread.
+        def wait_for_accessibility():
+            for _ in range(150):  # 5 minutes
+                time.sleep(2)
+                if is_accessible():
+                    log.info("Accessibility granted")
+                    start_hotkey_listener()
+                    return
+            log.error("Accessibility not granted after 5 minutes")
+            AppHelper.callAfter(lambda: AppKit.NSApp.terminate_(None))
+        threading.Thread(target=wait_for_accessibility, daemon=True).start()
+
+    log.info("Menu bar started")
+    AppHelper.runEventLoop()
 
 
 if __name__ == "__main__":
