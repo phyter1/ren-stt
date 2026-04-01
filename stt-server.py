@@ -50,6 +50,7 @@ import wave
 # ── Punctuation model ──────────────────────────────────────────────
 
 _punct_model = None
+_use_punct_model = False  # toggled via config: server.punctuation_model
 
 
 def load_punctuation_model():
@@ -92,16 +93,19 @@ def clean_transcript(text):
     if not text:
         return text
 
-    # Step 2: Punctuation model (if available)
-    if _punct_model is not None:
+    # Step 2: Punctuation model (if enabled and available)
+    if _use_punct_model and _punct_model is not None:
         try:
-            results = _punct_model.infer([text.lower()])
+            # Strip existing punctuation so model doesn't double up
+            stripped = re.sub(r"[.,!?;:]", "", text).lower()
+            stripped = re.sub(r"\s+", " ", stripped).strip()
+            results = _punct_model.infer([stripped])
             if results and results[0]:
                 return " ".join(results[0])
         except Exception:
             pass  # fall through to regex
 
-    # Step 3: Regex fallback
+    # Step 3: Regex cleanup (always runs if punct model is off)
     text = re.sub(r"\s+([.,!?])", r"\1", text)
     text = re.sub(r"([.,!?])\1+", r"\1", text)
     if text:
@@ -395,7 +399,13 @@ def main():
     parser.add_argument("--host", default=server_conf.get("host", "0.0.0.0"))
     parser.add_argument("--model", default=server_conf.get("model", DEFAULT_MODEL),
                         help=f"Model to load: {', '.join(MODELS.keys())} or a HuggingFace ID (default: {DEFAULT_MODEL})")
+    parser.add_argument("--punctuation-model", action="store_true",
+                        default=server_conf.get("punctuation_model", False),
+                        help="Enable ONNX punctuation model (default: off, uses Parakeet's native punctuation)")
     args = parser.parse_args()
+
+    global _use_punct_model
+    _use_punct_model = args.punctuation_model
 
     load_model(args.model)
 
