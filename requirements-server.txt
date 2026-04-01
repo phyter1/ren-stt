@@ -1,0 +1,4 @@
+mlx>=0.20.0
+parakeet-mlx
+librosa
+numpy

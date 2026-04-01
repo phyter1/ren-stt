@@ -1,0 +1,13 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8222
+  },
+  "client": {
+    "server_url": "http://localhost:8222",
+    "hotkey": "option+space",
+    "mode": "toggle",
+    "sensitivity": 18,
+    "indicator": true
+  }
+}
