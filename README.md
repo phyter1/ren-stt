@@ -6,6 +6,8 @@ Press **Option+Space**, speak, press again. Text appears wherever your cursor is
 
 Powered by [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) on [MLX](https://github.com/ml-explore/mlx) with automatic punctuation, capitalization, and filler word removal. 30x realtime on Apple Silicon.
 
+### [⬇ Download RenSTT.dmg](https://github.com/phyter1/ren-stt/releases/latest/download/RenSTT.dmg) (Apple Silicon)
+
 ## Install
 
 ```bash
