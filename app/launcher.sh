@@ -207,9 +207,18 @@ register_login_item
 
 MODE=$(get_mode)
 
+QUIT_FLAG="$CONFIG_DIR/.quit"
+
+# Clean quit flag on launch (we're starting fresh)
+rm -f "$QUIT_FLAG"
+
+# If we receive SIGTERM/SIGINT (user quit), set the flag so we don't retry
+trap 'touch "$QUIT_FLAG"; exit 0' SIGTERM SIGINT
+
 run_with_backoff() {
-    # If the process exits quickly (e.g. permissions not granted), wait before retrying
-    # to avoid spamming notifications. After 3 fast failures, show a dialog and stop.
+    # If the process exits quickly (e.g. permissions not granted), wait before retrying.
+    # After 3 fast failures, show a dialog and stop.
+    # If the user explicitly quit, don't retry.
     local failures=0
     while true; do
         local start_time
@@ -217,6 +226,12 @@ run_with_backoff() {
 
         "$@"
         local exit_code=$?
+
+        # User quit — don't retry
+        if [[ -f "$QUIT_FLAG" ]]; then
+            rm -f "$QUIT_FLAG"
+            break
+        fi
 
         local elapsed=$(( $(date +%s) - start_time ))
 
