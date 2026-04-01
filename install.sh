@@ -365,7 +365,8 @@ case "$MODE" in
         check_sox
         setup_venv
         info "Installing Python dependencies into venv..."
-        $VENV_PIP install -q -r "$REPO_DIR/requirements-client.txt"
+        $VENV_PIP install -q --upgrade pip
+        $VENV_PIP install -q pynput sounddevice numpy
         build_app_bundle
         write_config "$SERVER_HOST"
         mkdir -p "$PLIST_DIR"
