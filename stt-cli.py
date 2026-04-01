@@ -147,6 +147,22 @@ def hide_indicator():
         indicator_process = None
 
 
+def check_accessibility():
+    """Check if we have Accessibility permissions. If not, prompt and exit cleanly."""
+    try:
+        import Cocoa
+        trusted = Cocoa.AXIsProcessTrustedWithOptions({
+            "AXTrustedCheckOptionPrompt": True
+        })
+        if not trusted:
+            print("Accessibility permission required. macOS should have opened System Settings.")
+            print("Add this app, then relaunch.")
+            sys.exit(0)  # exit cleanly — don't crash-loop
+    except ImportError:
+        # No PyObjC — fall back to checking via pynput (will print warning if untrusted)
+        pass
+
+
 def check_deps():
     """Check that sox is installed."""
     try:
@@ -423,6 +439,7 @@ def main():
     indicator_sensitivity = args.sensitivity
 
     check_deps()
+    check_accessibility()
 
     if not check_server():
         print(f"STT server not reachable at {get_server()}")

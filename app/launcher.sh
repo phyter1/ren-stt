@@ -187,13 +187,12 @@ launch_server() {
 }
 
 launch_client() {
-    exec "$VENV_PYTHON" -u "$RESOURCES/stt-cli.py" \
+    "$VENV_PYTHON" -u "$RESOURCES/stt-cli.py" \
         >> "$LOG_DIR/client.log" 2>&1
 }
 
 launch_server_only() {
-    # In server-only mode, run server in foreground (keeps .app alive)
-    exec "$VENV_PYTHON" -u "$RESOURCES/stt-server.py" \
+    "$VENV_PYTHON" -u "$RESOURCES/stt-server.py" \
         >> "$LOG_DIR/server.log" 2>&1
 }
 
@@ -208,17 +207,48 @@ register_login_item
 
 MODE=$(get_mode)
 
+run_with_backoff() {
+    # If the process exits quickly (e.g. permissions not granted), wait before retrying
+    # to avoid spamming notifications. After 3 fast failures, show a dialog and stop.
+    local failures=0
+    while true; do
+        local start_time
+        start_time=$(date +%s)
+
+        "$@"
+        local exit_code=$?
+
+        local elapsed=$(( $(date +%s) - start_time ))
+
+        if [[ $exit_code -eq 0 ]]; then
+            break  # clean exit
+        fi
+
+        if [[ $elapsed -lt 5 ]]; then
+            failures=$((failures + 1))
+            if [[ $failures -ge 3 ]]; then
+                dialog 'display dialog "Ren STT failed to start.\n\nCheck Accessibility permissions in System Settings > Privacy & Security > Accessibility.\n\nLogs: ~/.config/ren-stt/" buttons {"Open Settings", "OK"} default button "OK" with title "Ren STT" with icon caution'
+                open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+                exit 1
+            fi
+            sleep 5
+        else
+            failures=0  # ran long enough — reset
+        fi
+    done
+}
+
 case "$MODE" in
     client)
-        launch_client
+        run_with_backoff launch_client
         ;;
     server)
-        launch_server_only
+        run_with_backoff launch_server_only
         ;;
     standalone)
         launch_server
         sleep 3  # let server load before client tries to connect
-        launch_client
+        run_with_backoff launch_client
         ;;
     *)
         # Config exists but no mode — re-run setup
