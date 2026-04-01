@@ -1,46 +1,58 @@
 # ren-stt
 
-Local speech-to-text for macOS. A Superwhisper replacement that runs entirely on your hardware.
+Local speech-to-text for macOS. Runs on your hardware — no cloud, no subscription.
 
-**Server:** Parakeet TDT 0.6B on MLX — fast, private, no cloud API needed.  
-**Client:** Global hotkey, floating waveform indicator, menu bar icon, auto-paste.
+Press **Option+Space**, speak, press again. Text appears wherever your cursor is.
 
-Runs on one machine or split across a network: server on your Apple Silicon box, client on any Mac.
+Powered by [Parakeet TDT 0.6B](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) on [MLX](https://github.com/ml-explore/mlx). 30x realtime on Apple Silicon.
 
-## Quick Start
-
-### Client (any Mac) — DMG installer
+## Install
 
 ```bash
-git clone https://github.com/phyter1/ren-stt.git
-cd ren-stt
+curl -fsSL https://raw.githubusercontent.com/phyter1/ren-stt/main/get.sh | bash
+```
+
+The installer asks you to pick a mode:
+
+| Mode | What it does | Requires |
+|------|-------------|----------|
+| **standalone** | Runs the model + hotkey client on one machine | Apple Silicon |
+| **server** | Hosts the model for other machines on your network | Apple Silicon |
+| **client** | Hotkey client that connects to a server | Any Mac |
+
+Or pass the mode directly:
+
+```bash
+# Standalone (Apple Silicon)
+curl -fsSL https://raw.githubusercontent.com/phyter1/ren-stt/main/get.sh | bash -s -- standalone
+
+# Server only
+curl -fsSL https://raw.githubusercontent.com/phyter1/ren-stt/main/get.sh | bash -s -- server
+
+# Client pointing at a server
+curl -fsSL https://raw.githubusercontent.com/phyter1/ren-stt/main/get.sh | bash -s -- client --server myhost.local
+```
+
+### What the installer does
+
+1. Clones the repo to `~/.local/share/ren-stt`
+2. Creates a Python virtual environment (nothing installed globally)
+3. Installs dependencies for your chosen mode
+4. Writes config to `~/.config/ren-stt/config.json`
+5. Starts a launchd service (runs on boot)
+6. Walks you through granting Accessibility + Microphone permissions
+
+### macOS app (Apple Silicon only)
+
+If you prefer a drag-to-install `.app`:
+
+```bash
+git clone https://github.com/phyter1/ren-stt.git && cd ren-stt
 ./build-dmg.sh
 open dist/RenSTT.dmg
 ```
 
-Drag **RenSTT** to **Applications**, then open it. First launch:
-- Prompts for STT server URL (localhost or a remote machine)
-- Creates a virtual environment and installs dependencies
-- macOS asks for **Accessibility** and **Microphone** permissions (native dialogs)
-- Registers as a Login Item (starts on boot)
-
-### Server (Apple Silicon)
-
-```bash
-git clone https://github.com/phyter1/ren-stt.git
-cd ren-stt
-./install.sh server
-```
-
-### CLI install (alternative)
-
-```bash
-# All-in-one on Apple Silicon:
-./install.sh standalone
-
-# Client only, pointing at a remote server:
-./install.sh client --server your-server.local
-```
+Or download `RenSTT.dmg` from the [latest release](https://github.com/phyter1/ren-stt/releases).
 
 ## Usage
 
@@ -49,134 +61,81 @@ cd ren-stt
 | Start/stop recording | **Option+Space** |
 | Cancel recording | **Escape** |
 
-Text is transcribed and pasted into whatever app has focus.
+Transcribed text is copied to clipboard and pasted into the active app.
 
-## Install Modes
-
-| Mode | What it installs | Requires |
-|------|-----------------|----------|
-| `standalone` | Server + client | Apple Silicon, sox |
-| `server` | Inference server only | Apple Silicon |
-| `client` | Hotkey client only | sox, network access to server |
-
-All three modes install as **launchd services** that start on boot.
+A waveform icon appears in the menu bar — black when idle, red when recording, orange when transcribing.
 
 ## Configuration
 
-Config lives at `~/.config/ren-stt/config.json`:
+Edit `~/.config/ren-stt/config.json`:
 
 ```json
 {
-  "server": {
-    "host": "0.0.0.0",
-    "port": 8222
-  },
   "client": {
     "server_url": "http://localhost:8222",
     "hotkey": "option+space",
     "mode": "toggle",
-    "sensitivity": 18,
-    "indicator": true
+    "sensitivity": 18
   }
 }
 ```
 
-- **hotkey**: Any combo of `option`, `cmd`, `ctrl`, `shift` + a trigger key (`space`, `f1`-`f12`, or a letter)
-- **mode**: `toggle` (press to start/stop) or `push-to-talk` (hold to record)
-- **sensitivity**: Audio level bar sensitivity (higher = more responsive, default 18)
-- **indicator**: Show/hide the floating waveform window
+| Option | Values | Default |
+|--------|--------|---------|
+| `hotkey` | Any combo: `option`, `cmd`, `ctrl`, `shift` + `space`, `f1`-`f12`, or a letter | `option+space` |
+| `mode` | `toggle` (press to start/stop) or `push-to-talk` (hold to record) | `toggle` |
+| `sensitivity` | Audio level bar responsiveness (higher = more sensitive) | `18` |
+| `server_url` | URL of the STT server | `http://localhost:8222` |
 
-## CLI Options
+## Network setup
 
-```bash
-# Client
-python3 stt-cli.py --hotkey ctrl+shift+space  # custom hotkey
-python3 stt-cli.py --push-to-talk              # hold-to-record mode
-python3 stt-cli.py --server http://host:8222   # remote server
-python3 stt-cli.py --no-indicator              # no waveform popup
-python3 stt-cli.py --sensitivity 25            # boost for quiet mics
+Run the server on one Apple Silicon machine, clients on everything else:
 
-# Server
-python3 stt-server.py --port 9000             # custom port
 ```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  MacBook Air │     │   Mac Mini   │     │   Mac Pro    │
+│   (client)   │────▶│  (server)    │◀────│   (client)   │
+│  Option+Space│     │  Parakeet    │     │  Option+Space│
+└──────────────┘     │  MLX :8222   │     └──────────────┘
+                     └──────────────┘
+```
+
+Clients send audio over HTTP, server returns text. All on your local network.
 
 ## API
 
-The server exposes a simple HTTP API:
+The server has a simple HTTP API:
 
 ```bash
 # Transcribe audio
 curl -X POST http://localhost:8222/transcribe -F audio=@recording.wav
+# {"text": "hello world", "duration_s": 2.1, "inference_ms": 380, "rtf": 5.5}
 
 # Health check
 curl http://localhost:8222/health
 
-# Web UI (browser mic recording + file upload)
+# Web UI (browser mic + file upload)
 open http://localhost:8222
-```
-
-Response:
-```json
-{
-  "text": "transcribed text here",
-  "duration_s": 4.06,
-  "inference_ms": 1170,
-  "rtf": 3.5
-}
-```
-
-## Architecture
-
-```
-┌─────────────────────────────────┐
-│  Any Mac (client)               │
-│  ┌───────────┐  ┌────────────┐  │
-│  │ stt-cli   │  │ menu bar   │  │
-│  │ (hotkey)  │  │ (waveform) │  │
-│  └─────┬─────┘  └────────────┘  │
-│        │ audio                   │
-│        ▼                         │
-│  ┌───────────┐                   │
-│  │    sox     │                   │
-│  │ (record)  │                   │
-│  └─────┬─────┘                   │
-└────────┼────────────────────────┘
-         │ HTTP POST /transcribe
-         ▼
-┌─────────────────────────────────┐
-│  Apple Silicon (server)         │
-│  ┌───────────┐  ┌────────────┐  │
-│  │ stt-server│  │  Parakeet  │  │
-│  │ (HTTP)    │──│  (MLX)     │  │
-│  └───────────┘  └────────────┘  │
-└─────────────────────────────────┘
 ```
 
 ## Performance
 
 Tested on M1 Pro (16GB):
 
-| Audio length | Inference time | Speed |
-|-------------|---------------|-------|
-| 4s          | ~1.2s         | 3.5x realtime |
-| 16s         | ~500ms        | 31x realtime |
-
-Longer audio is proportionally faster due to MLX batch processing.
-
-## Requirements
-
-- **Server:** macOS with Apple Silicon, Python 3.10+
-- **Client:** macOS (any Mac), Python 3.10+, sox (`brew install sox`)
-- **Model:** ~400MB downloaded on first server start
-
-The installer creates a virtual environment at `.venv/` inside the repo. All Python dependencies are isolated there — nothing is installed globally.
+| Audio | Inference | Speed |
+|-------|-----------|-------|
+| 4s | ~1.2s | 3.5x realtime |
+| 16s | ~500ms | 31x realtime |
+| 47s | ~7.7s | 6.1x realtime |
 
 ## Uninstall
 
 ```bash
-./install.sh uninstall        # remove launchd services
-rm -rf ~/.config/ren-stt      # remove config
-rm -rf .venv                  # remove virtual environment
+# Via installer
+cd ~/.local/share/ren-stt && ./install.sh uninstall
+
+# Full removal
+rm -rf ~/.local/share/ren-stt ~/.config/ren-stt
 ```
 
 ## License
