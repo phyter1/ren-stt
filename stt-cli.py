@@ -600,8 +600,12 @@ Then relaunch Ren STT." \
     return conf_data
 
 
+_server_proc = None
+
+
 def _start_server(conf):
     """Start the STT server from the server venv."""
+    global _server_proc
     config_dir = os.path.expanduser("~/.config/ren-stt")
     venv_python = os.path.join(config_dir, "server-venv", "bin", "python3")
     server_script = os.path.join(SCRIPT_DIR, "stt-server.py")
@@ -618,6 +622,7 @@ def _start_server(conf):
         stderr=subprocess.STDOUT,
         cwd=SCRIPT_DIR,
     )
+    _server_proc = proc
     log.info("Server started (PID: %d)", proc.pid)
 
     # Write PID for cleanup
@@ -625,6 +630,37 @@ def _start_server(conf):
         f.write(str(proc.pid))
 
     return proc
+
+
+def _start_server_watchdog(conf):
+    """Background thread that monitors the server and restarts it if it dies."""
+    def watchdog():
+        while True:
+            time.sleep(10)
+            if not check_server():
+                log.warning("Server health check failed — checking process")
+                global _server_proc
+                if _server_proc and _server_proc.poll() is not None:
+                    log.warning("Server process died (exit code %d) — restarting",
+                               _server_proc.returncode)
+                    _start_server(conf)
+                    # Wait for it to come up
+                    for i in range(60):
+                        time.sleep(1)
+                        if check_server():
+                            log.info("Server restarted successfully after %ds", i + 1)
+                            break
+                    else:
+                        log.error("Server failed to restart")
+                elif _server_proc is None:
+                    log.warning("No server process — starting one")
+                    _start_server(conf)
+                else:
+                    log.warning("Server process alive but not responding — waiting")
+    t = threading.Thread(target=watchdog, daemon=True)
+    t.start()
+    log.info("Server watchdog started")
+    return t
 
 
 def main():
@@ -689,11 +725,10 @@ def main():
     _accessibility_ok = check_accessibility()
 
     # Standalone: start the server first
-    _server_proc = None
     if install_mode == "standalone":
         log.info("Starting local server...")
         _osascript('display notification "Loading speech model (first launch takes ~30s)..." with title "Ren STT"')
-        _server_proc = _start_server(conf)
+        _start_server(conf)
         # Wait for server to be ready
         for i in range(60):
             time.sleep(1)
@@ -702,6 +737,8 @@ def main():
                 break
         else:
             log.error("Server didn't start in 60s")
+        # Watchdog restarts server if it dies
+        _start_server_watchdog(conf)
 
     log.info("Checking server...")
     if not check_server():

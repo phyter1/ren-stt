@@ -32,9 +32,14 @@ def load():
         try:
             with open(CONFIG_PATH) as f:
                 user = json.load(f)
+            # Merge nested sections
             for section in ("server", "client"):
                 if section in user:
                     config[section].update(user[section])
+            # Preserve top-level keys (install_mode, etc.)
+            for key, val in user.items():
+                if key not in ("server", "client"):
+                    config[key] = val
         except Exception as e:
             print(f"Warning: could not read {CONFIG_PATH}: {e}")
 
