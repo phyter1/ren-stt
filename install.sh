@@ -10,6 +10,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_DIR="$HOME/.config/ren-stt"
+VENV_DIR="$REPO_DIR/.venv"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PYTHON="${PYTHON:-python3}"
 
@@ -34,6 +35,19 @@ check_python() {
     info "Using Python: $($PYTHON --version)"
 }
 
+setup_venv() {
+    if [[ -d "$VENV_DIR" ]]; then
+        info "Virtual environment exists at $VENV_DIR"
+    else
+        info "Creating virtual environment..."
+        $PYTHON -m venv "$VENV_DIR"
+    fi
+    # All subsequent pip/python calls use the venv
+    VENV_PYTHON="$VENV_DIR/bin/python3"
+    VENV_PIP="$VENV_DIR/bin/pip"
+    info "venv: $VENV_DIR"
+}
+
 check_sox() {
     if ! command -v sox &>/dev/null; then
         warn "sox not found — installing via Homebrew..."
@@ -43,7 +57,8 @@ check_sox() {
             error "sox is required for audio recording. Install it: brew install sox"
         fi
     fi
-    info "sox: $(command -v sox)"
+    SOX_PATH="$(command -v sox)"
+    info "sox: $SOX_PATH"
 }
 
 check_apple_silicon() {
@@ -81,8 +96,18 @@ EOF
     info "Config written to $CONFIG_DIR/config.json"
 }
 
+# Build a PATH for launchd that can find sox and other tools
+build_launchd_path() {
+    local homebrew_prefix
+    homebrew_prefix="$(brew --prefix 2>/dev/null || echo "/opt/homebrew")"
+    echo "$VENV_DIR/bin:$homebrew_prefix/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+}
+
 install_server_plist() {
     local plist="$PLIST_DIR/$SERVER_LABEL.plist"
+    local launchd_path
+    launchd_path="$(build_launchd_path)"
+
     cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -92,19 +117,26 @@ install_server_plist() {
     <string>$SERVER_LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$PYTHON</string>
+        <string>$VENV_PYTHON</string>
         <string>$REPO_DIR/stt-server.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$REPO_DIR</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$launchd_path</string>
+        <key>VIRTUAL_ENV</key>
+        <string>$VENV_DIR</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>$HOME/.config/ren-stt/server.log</string>
+    <string>$CONFIG_DIR/server.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/.config/ren-stt/server.log</string>
+    <string>$CONFIG_DIR/server.log</string>
 </dict>
 </plist>
 EOF
@@ -115,6 +147,9 @@ EOF
 
 install_client_plist() {
     local plist="$PLIST_DIR/$CLIENT_LABEL.plist"
+    local launchd_path
+    launchd_path="$(build_launchd_path)"
+
     cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -124,26 +159,69 @@ install_client_plist() {
     <string>$CLIENT_LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$PYTHON</string>
+        <string>$VENV_PYTHON</string>
         <string>-u</string>
         <string>$REPO_DIR/stt-cli.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$REPO_DIR</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$launchd_path</string>
+        <key>VIRTUAL_ENV</key>
+        <string>$VENV_DIR</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>$HOME/.config/ren-stt/client.log</string>
+    <string>$CONFIG_DIR/client.log</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/.config/ren-stt/client.log</string>
+    <string>$CONFIG_DIR/client.log</string>
 </dict>
 </plist>
 EOF
     launchctl unload "$plist" 2>/dev/null || true
     launchctl load "$plist"
     info "Client service installed and started ($CLIENT_LABEL)"
+}
+
+prompt_permissions() {
+    echo ""
+    info "ren-stt needs two macOS permissions to work:"
+    echo ""
+    echo "  1. Accessibility — lets the hotkey listener detect keypresses and paste text"
+    echo "  2. Microphone    — lets sox record audio"
+    echo ""
+    info "Opening System Settings..."
+
+    # Open Accessibility pane
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+
+    echo ""
+    echo "  Add the Python binary to Accessibility:"
+    echo "  $VENV_PYTHON"
+    echo ""
+    echo "  If running from a terminal app (Terminal, iTerm, etc.),"
+    echo "  add that app instead — it covers all child processes."
+    echo ""
+    read -rp "  Press Enter once Accessibility is granted..."
+
+    # Open Microphone pane
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+
+    echo ""
+    echo "  Ensure your terminal app has Microphone access."
+    echo ""
+    read -rp "  Press Enter once Microphone is granted..."
+
+    echo ""
+    info "Permissions configured. Restarting client..."
+    launchctl unload "$PLIST_DIR/$CLIENT_LABEL.plist" 2>/dev/null || true
+    launchctl load "$PLIST_DIR/$CLIENT_LABEL.plist"
+    info "Client restarted."
 }
 
 uninstall() {
@@ -159,8 +237,10 @@ uninstall() {
     done
 
     echo ""
-    info "Services removed. Config preserved at $CONFIG_DIR/config.json"
-    info "To fully remove: rm -rf $CONFIG_DIR"
+    info "Services removed."
+    info "Config preserved at $CONFIG_DIR/config.json"
+    info "Venv preserved at $VENV_DIR"
+    info "To fully remove: rm -rf $CONFIG_DIR $VENV_DIR"
 }
 
 # ── Main ────────────────────────────────────────────────────────────
@@ -210,8 +290,9 @@ case "$MODE" in
         echo "=== Installing ren-stt server ==="
         check_python
         check_apple_silicon
-        info "Installing Python dependencies..."
-        $PYTHON -m pip install -q -r "$REPO_DIR/requirements-server.txt"
+        setup_venv
+        info "Installing Python dependencies into venv..."
+        $VENV_PIP install -q -r "$REPO_DIR/requirements-server.txt"
         write_config "http://localhost:$SERVER_PORT"
         mkdir -p "$PLIST_DIR"
         install_server_plist
@@ -236,15 +317,16 @@ case "$MODE" in
         echo "=== Installing ren-stt client ==="
         check_python
         check_sox
-        info "Installing Python dependencies..."
-        $PYTHON -m pip install -q -r "$REPO_DIR/requirements-client.txt"
+        setup_venv
+        info "Installing Python dependencies into venv..."
+        $VENV_PIP install -q -r "$REPO_DIR/requirements-client.txt"
         write_config "$SERVER_HOST"
         mkdir -p "$PLIST_DIR"
         install_client_plist
         echo ""
         info "Client running — server at $SERVER_HOST"
         info "Hotkey: Option+Space (configure in $CONFIG_DIR/config.json)"
-        warn "Grant Accessibility permissions to your terminal app in System Settings > Privacy & Security"
+        prompt_permissions
         ;;
 
     standalone)
@@ -252,9 +334,10 @@ case "$MODE" in
         check_python
         check_apple_silicon
         check_sox
-        info "Installing all Python dependencies..."
-        $PYTHON -m pip install -q -r "$REPO_DIR/requirements-server.txt"
-        $PYTHON -m pip install -q -r "$REPO_DIR/requirements-client.txt"
+        setup_venv
+        info "Installing all Python dependencies into venv..."
+        $VENV_PIP install -q -r "$REPO_DIR/requirements-server.txt"
+        $VENV_PIP install -q -r "$REPO_DIR/requirements-client.txt"
         write_config "http://localhost:$SERVER_PORT"
         mkdir -p "$PLIST_DIR"
         install_server_plist
@@ -263,7 +346,7 @@ case "$MODE" in
         echo ""
         info "Server running on port $SERVER_PORT"
         info "Client running — hotkey: Option+Space"
-        warn "Grant Accessibility permissions to your terminal app in System Settings > Privacy & Security"
+        prompt_permissions
         ;;
 
     uninstall)

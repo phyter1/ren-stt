@@ -154,11 +154,14 @@ Longer audio is proportionally faster due to MLX batch processing.
 - **Client:** macOS (any Mac), Python 3.10+, sox (`brew install sox`)
 - **Model:** ~400MB downloaded on first server start
 
+The installer creates a virtual environment at `.venv/` inside the repo. All Python dependencies are isolated there — nothing is installed globally.
+
 ## Uninstall
 
 ```bash
 ./install.sh uninstall        # remove launchd services
 rm -rf ~/.config/ren-stt      # remove config
+rm -rf .venv                  # remove virtual environment
 ```
 
 ## License
