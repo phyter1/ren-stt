@@ -82,8 +82,7 @@ def clean_transcript(text):
 
     # Step 1: Remove filler words
     fillers = [
-        r"\byou know\b", r"\bi mean\b", r"\bkind of\b", r"\bsort of\b",
-        r"\b(uh|uhh|uhm|um|umm|hmm|hm|er|ah)\b",
+        r"\b(uh|uhh|uhm|um|umm|hmm|hm|er)\b",
         r"\b(uh|um)'s\b",
     ]
     for f in fillers:
