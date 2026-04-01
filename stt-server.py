@@ -137,6 +137,15 @@ def load_model(model_key):
 
     import mlx.core as mx
     from parakeet_mlx import from_pretrained
+
+    # Pin model weights in wired memory so macOS can't page them out
+    # when other MLX processes (fleet router, etc.) compete for GPU memory
+    try:
+        mx.metal.set_wired_limit(6 * 1024**3)  # 6GB — enough for 1.1B + overhead
+        print("Wired memory limit set (6GB).", flush=True)
+    except Exception as e:
+        print(f"Could not set wired limit: {e}", flush=True)
+
     model = from_pretrained(MODEL_NAME)
     load_time = time.time() - load_start
     print(f"Model loaded in {load_time:.1f}s", flush=True)
