@@ -13,6 +13,7 @@ DEFAULTS = {
     "server": {
         "host": "0.0.0.0",
         "port": 8222,
+        "model": "small",
     },
     "client": {
         "server_url": "http://localhost:8222",

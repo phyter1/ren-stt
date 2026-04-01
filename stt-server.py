@@ -33,36 +33,57 @@ import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs
 
-# Model loading (do this once at startup)
-print("Loading Parakeet TDT 0.6B v3...", flush=True)
-load_start = time.time()
+MODELS = {
+    "small": "mlx-community/parakeet-tdt-0.6b-v3",
+    "large": "mlx-community/parakeet-tdt-1.1b",
+    # Aliases
+    "0.6b": "mlx-community/parakeet-tdt-0.6b-v3",
+    "1.1b": "mlx-community/parakeet-tdt-1.1b",
+}
+DEFAULT_MODEL = "small"
 
-import mlx.core as mx
-from parakeet_mlx import from_pretrained
-
-MODEL_NAME = "mlx-community/parakeet-tdt-0.6b-v3"
-model = from_pretrained(MODEL_NAME)
-load_time = time.time() - load_start
-print(f"Model loaded in {load_time:.1f}s", flush=True)
-
-# Pre-warm with a dummy inference
-print("Warming up...", flush=True)
 import numpy as np
 import librosa
 import wave
 
-dummy_path = os.path.join(tempfile.gettempdir(), "stt_warmup.wav")
-w = wave.open(dummy_path, 'w')
-w.setnchannels(1)
-w.setsampwidth(2)
-w.setframerate(16000)
-w.writeframes(b'\x00\x00' * 16000)
-w.close()
-try:
-    model.transcribe(dummy_path)
-except Exception as e:
-    print(f"Warmup note: {e}", flush=True)
-print("Ready.", flush=True)
+# Globals — set during init
+MODEL_NAME = None
+model = None
+load_time = 0
+
+
+def load_model(model_key):
+    """Load a Parakeet model by key or full HuggingFace ID."""
+    global MODEL_NAME, model, load_time
+
+    if model_key in MODELS:
+        MODEL_NAME = MODELS[model_key]
+    else:
+        MODEL_NAME = model_key  # assume it's a full HF model ID
+
+    print(f"Loading {MODEL_NAME}...", flush=True)
+    load_start = time.time()
+
+    import mlx.core as mx
+    from parakeet_mlx import from_pretrained
+    model = from_pretrained(MODEL_NAME)
+    load_time = time.time() - load_start
+    print(f"Model loaded in {load_time:.1f}s", flush=True)
+
+    # Pre-warm
+    print("Warming up...", flush=True)
+    dummy_path = os.path.join(tempfile.gettempdir(), "stt_warmup.wav")
+    w = wave.open(dummy_path, 'w')
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(16000)
+    w.writeframes(b'\x00\x00' * 16000)
+    w.close()
+    try:
+        model.transcribe(dummy_path)
+    except Exception as e:
+        print(f"Warmup note: {e}", flush=True)
+    print("Ready.", flush=True)
 
 
 class STTHandler(BaseHTTPRequestHandler):
@@ -288,11 +309,16 @@ async function transcribe(blob, filename) {
 def main():
     import config as cfg
     conf = cfg.load()
+    server_conf = conf["server"]
 
     parser = argparse.ArgumentParser(description="Parakeet STT server (MLX)")
-    parser.add_argument("--port", type=int, default=conf["server"]["port"])
-    parser.add_argument("--host", default=conf["server"]["host"])
+    parser.add_argument("--port", type=int, default=server_conf.get("port", 8222))
+    parser.add_argument("--host", default=server_conf.get("host", "0.0.0.0"))
+    parser.add_argument("--model", default=server_conf.get("model", DEFAULT_MODEL),
+                        help=f"Model to load: {', '.join(MODELS.keys())} or a HuggingFace ID (default: {DEFAULT_MODEL})")
     args = parser.parse_args()
+
+    load_model(args.model)
 
     server = HTTPServer((args.host, args.port), STTHandler)
     print(f"\nSTT server running at http://0.0.0.0:{args.port}", flush=True)
