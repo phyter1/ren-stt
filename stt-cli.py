@@ -223,9 +223,13 @@ def stop_recording_and_transcribe():
     if not recording:
         return
 
-    # Stop sox
+    # Stop sox — SIGTERM then wait, SIGKILL if stuck
     record_process.terminate()
-    record_process.wait()
+    try:
+        record_process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        record_process.kill()
+        record_process.wait()
     recording = False
 
     eat_space()
@@ -307,7 +311,11 @@ def cancel_recording():
     if not recording:
         return
     record_process.terminate()
-    record_process.wait()
+    try:
+        record_process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        record_process.kill()
+        record_process.wait()
     recording = False
     hide_indicator()
     menubar_send("idle")

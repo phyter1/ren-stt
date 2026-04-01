@@ -42,9 +42,52 @@ MODELS = {
 }
 DEFAULT_MODEL = "small"
 
+import re
 import numpy as np
 import librosa
 import wave
+
+
+def clean_transcript(text):
+    """Remove filler words and fix capitalization. Parakeet handles punctuation."""
+    if not text:
+        return text
+
+    # Remove filler words/sounds
+    fillers = [
+        r"\byou know\b", r"\bi mean\b", r"\bkind of\b", r"\bsort of\b",
+        r"\b(uh|uhh|uhm|um|umm|hmm|hm|er|ah)\b",
+        r"\b(uh|um)'s\b",  # "uh's" artifacts
+    ]
+    for f in fillers:
+        text = re.sub(f, "", text, flags=re.IGNORECASE)
+
+    # Collapse whitespace and fix double punctuation from removal
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([.,!?])", r"\1", text)  # remove space before punct
+    text = re.sub(r"([.,!?])\1+", r"\1", text)  # dedupe punct
+
+    # Capitalize first letter and after sentence-ending punctuation
+    if text:
+        text = text[0].upper() + text[1:]
+        text = re.sub(r"([.!?]\s+)(\w)", lambda m: m.group(1) + m.group(2).upper(), text)
+
+    # Add period if missing
+    if text and text[-1] not in ".!?":
+        text += "."
+
+    # Capitalize standalone "i"
+    text = re.sub(r"\bi\b", "I", text)
+    # Fix "I" at start that might have been lowered
+    if text:
+        text = text[0].upper() + text[1:]
+
+    # Question detection — if starts with a question word, use ?
+    q_words = r"^(what|how|where|when|why|who|whom|whose|which|does|do|did|is|are|was|were|can|could|would|will|shall|should|has|have|had|may|might|isn't|aren't|won't|wouldn't|couldn't|shouldn't|don't|doesn't|didn't)\b"
+    if re.match(q_words, text, re.IGNORECASE) and text.endswith("."):
+        text = text[:-1] + "?"
+
+    return text
 
 # Globals — set during init
 MODEL_NAME = None
@@ -161,8 +204,10 @@ class STTHandler(BaseHTTPRequestHandler):
 
             rtf = round(audio_duration / (inference_ms / 1000), 1) if inference_ms > 0 else 0
 
+            text = clean_transcript(text.strip())
+
             self._respond(200, {
-                "text": text.strip(),
+                "text": text,
                 "segments": segments,
                 "duration_s": round(audio_duration, 2),
                 "inference_ms": inference_ms,
