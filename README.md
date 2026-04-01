@@ -4,7 +4,7 @@ Local speech-to-text for macOS. Runs on your hardware — no cloud, no subscript
 
 Press **Option+Space**, speak, press again. Text appears wherever your cursor is.
 
-Powered by [Parakeet TDT 0.6B](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) on [MLX](https://github.com/ml-explore/mlx). 30x realtime on Apple Silicon.
+Powered by [Parakeet TDT](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) on [MLX](https://github.com/ml-explore/mlx) with automatic punctuation, capitalization, and filler word removal. 30x realtime on Apple Silicon.
 
 ## Install
 
@@ -87,6 +87,14 @@ Edit `~/.config/ren-stt/config.json`:
 | `sensitivity` | Audio level bar responsiveness (higher = more sensitive) | `18` |
 | `server_url` | URL of the STT server | `http://localhost:8222` |
 
+Server config:
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `model` | `small` (0.6B), `large` (1.1B), or any HuggingFace model ID | `small` |
+| `port` | Server port | `8222` |
+| `host` | Bind address | `0.0.0.0` |
+
 ## Network setup
 
 Run the server on one Apple Silicon machine, clients on everything else:
@@ -118,15 +126,26 @@ curl http://localhost:8222/health
 open http://localhost:8222
 ```
 
+## Post-processing
+
+Transcriptions are automatically cleaned:
+
+1. **Filler removal** — strips "uh", "um", "hmm", "er" (0ms, regex)
+2. **Punctuation & capitalization** — commas, periods, question marks, proper caps via [punct_cap_seg](https://huggingface.co/1-800-BAD-CODE/punct_cap_seg_47_language) ONNX model (~65ms, runs on CPU alongside MLX)
+3. **Sentence segmentation** — splits run-on speech into sentences
+
+Regex fallback if the punctuation model isn't available.
+
 ## Performance
 
-Tested on M1 Pro (16GB):
+Tested on M1 Pro (16GB) with Parakeet 1.1B + punctuation model:
 
-| Audio | Inference | Speed |
-|-------|-----------|-------|
-| 4s | ~1.2s | 3.5x realtime |
-| 16s | ~500ms | 31x realtime |
-| 47s | ~7.7s | 6.1x realtime |
+| Audio | Total latency | Pipeline |
+|-------|--------------|----------|
+| 2s | ~250ms | STT ~200ms + punct ~50ms |
+| 6s | ~300ms | STT ~240ms + punct ~60ms |
+| 16s | ~530ms | STT ~460ms + punct ~70ms |
+| 47s | ~1.9s | STT ~1.8s + punct ~70ms |
 
 ## Uninstall
 
