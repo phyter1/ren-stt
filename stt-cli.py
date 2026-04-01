@@ -23,12 +23,35 @@ import tempfile
 import json
 import signal
 import threading
+import logging
 from urllib.request import urlopen, Request
 
+# Set up file logging (frozen apps swallow stdout)
+_log_dir = os.path.expanduser("~/.config/ren-stt")
+os.makedirs(_log_dir, exist_ok=True)
+logging.basicConfig(
+    filename=os.path.join(_log_dir, "client.log"),
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("ren-stt")
+
 SAMPLE_RATE = 16000
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    SCRIPT_DIR = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # macOS system sounds
+# When frozen (PyInstaller), sys.executable is the Mach-O binary.
+# Subprocess scripts need a real Python interpreter.
+if getattr(sys, 'frozen', False):
+    import shutil
+    PYTHON_EXE = shutil.which("python3") or "/usr/bin/python3"
+else:
+    PYTHON_EXE = sys.executable
+
 SOUND_START = "/System/Library/Sounds/Tink.aiff"
 SOUND_STOP = "/System/Library/Sounds/Pop.aiff"
 SOUND_ERROR = "/System/Library/Sounds/Basso.aiff"
@@ -83,7 +106,7 @@ def start_menubar():
     global menubar_process
     try:
         menubar_process = subprocess.Popen(
-            [sys.executable, os.path.join(SCRIPT_DIR, "stt-menubar.py")],
+            [PYTHON_EXE, os.path.join(SCRIPT_DIR, "stt-menubar.py")],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -118,7 +141,7 @@ def show_indicator():
         return
     try:
         indicator_process = subprocess.Popen(
-            [sys.executable, os.path.join(SCRIPT_DIR, "stt-indicator.py"),
+            [PYTHON_EXE, os.path.join(SCRIPT_DIR, "stt-indicator.py"),
              "--sensitivity", str(indicator_sensitivity)],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
@@ -150,26 +173,22 @@ def hide_indicator():
 def check_accessibility():
     """Check if we have Accessibility permissions. If not, prompt and exit cleanly."""
     try:
-        import ctypes
-        import ctypes.util
-
-        # Load ApplicationServices framework
-        lib = ctypes.cdll.LoadLibrary(
-            ctypes.util.find_library("ApplicationServices")
-        )
+        import ctypes, ctypes.util
+        lib = ctypes.cdll.LoadLibrary(ctypes.util.find_library("ApplicationServices"))
         lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        trusted = lib.AXIsProcessTrusted()
+        log.info("AXIsProcessTrusted: %s", trusted)
 
-        if not lib.AXIsProcessTrusted():
-            print("Accessibility permission required.")
-            print("Add this app in System Settings > Privacy & Security > Accessibility, then relaunch.")
-            # Try to open the settings pane
+        if not trusted:
+            # Try to open settings for the user
+            log.info("Not trusted — opening Accessibility settings")
             subprocess.Popen(
                 ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            sys.exit(2)  # non-zero so backoff catches it, but distinct from crash
+            sys.exit(2)
     except Exception as e:
-        print(f"Warning: could not check accessibility: {e}")
+        log.warning("Could not check accessibility: %s", e)
 
 
 def check_deps():
@@ -211,6 +230,7 @@ def start_recording():
     play_sound(SOUND_START)
     show_indicator()
     menubar_send("recording")
+    log.info("Recording started: %s", temp_file)
     print("\r\033[91m● Recording...\033[0m", end="", flush=True)
 
 
@@ -230,10 +250,14 @@ def stop_recording_and_transcribe():
     play_sound(SOUND_STOP)
     hide_indicator()
     menubar_send("transcribing")
+    log.info("Recording stopped, transcribing...")
     print("\r\033[93m◉ Transcribing...\033[0m", end="", flush=True)
 
     # Check file exists and has content
-    if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 1000:
+    file_size = os.path.getsize(temp_file) if os.path.exists(temp_file) else 0
+    log.info("Audio file: %s (%d bytes)", temp_file, file_size)
+    if not os.path.exists(temp_file) or file_size < 1000:
+        log.info("Too short, skipped")
         print("\r\033[90m○ Too short, skipped\033[0m    ", flush=True)
         menubar_send("idle")
         cleanup()
@@ -264,6 +288,7 @@ def stop_recording_and_transcribe():
         inference_ms = result.get("inference_ms", 0)
         duration_s = result.get("duration_s", 0)
         rtf = result.get("rtf", 0)
+        log.info("Transcription result: '%s' (%dms, %.1fs audio)", text, inference_ms, duration_s)
 
         if not text:
             print(f"\r\033[90m○ No speech detected ({duration_s}s)\033[0m    ", flush=True)
@@ -286,6 +311,7 @@ def stop_recording_and_transcribe():
         print(f"  \033[90m{duration_s}s audio → {inference_ms}ms ({rtf}x RT)\033[0m")
 
     except Exception as e:
+        log.error("Transcription error: %s", e, exc_info=True)
         play_sound(SOUND_ERROR)
         print(f"\r\033[91m✗ Error: {e}\033[0m")
 
@@ -422,9 +448,20 @@ def run_toggle(hotkey_combo):
 
 
 def main():
+    log.info("=== ren-stt starting (frozen=%s) ===", getattr(sys, 'frozen', False))
+
+    # Handle PyInstaller frozen environment
+    if getattr(sys, 'frozen', False):
+        meipass = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+        log.info("_MEIPASS: %s", meipass)
+        sys.path.insert(0, meipass)
+
+    log.info("Importing config...")
     import config as cfg
+    log.info("Loading config...")
     conf = cfg.load()
     client = conf["client"]
+    log.info("Config loaded: server=%s hotkey=%s", client["server_url"], client["hotkey"])
 
     import argparse
     parser = argparse.ArgumentParser(description="Hotkey-triggered STT with auto-paste")
@@ -447,8 +484,11 @@ def main():
     use_indicator = not args.no_indicator
     indicator_sensitivity = args.sensitivity
 
+    log.info("Checking deps...")
     check_deps()
+    log.info("Checking accessibility...")
     check_accessibility()
+    log.info("Checking server...")
 
     if not check_server():
         print(f"STT server not reachable at {get_server()}")
@@ -456,6 +496,7 @@ def main():
         sys.exit(1)
 
     mode = "push-to-talk" if args.push_to_talk else "toggle"
+    log.info("All checks passed. Starting in %s mode.", mode)
     print(f"ren-stt ready — {mode} mode")
     print(f"Hotkey: {args.hotkey}")
     print(f"Server: {get_server()}")
@@ -468,11 +509,15 @@ def main():
     print("Escape to cancel a recording.")
     print("Ctrl+C to quit.\n")
 
-    start_menubar()
+    # Subprocess-based UI (menubar/indicator) needs a real Python with deps.
+    # Skip in frozen mode — the main hotkey listener still works.
+    if not getattr(sys, 'frozen', False):
+        start_menubar()
 
     def shutdown(*_):
         hide_indicator()
-        stop_menubar()
+        if not getattr(sys, 'frozen', False):
+            stop_menubar()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
@@ -484,4 +529,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        log.error("Fatal: %s", e, exc_info=True)
+        raise
