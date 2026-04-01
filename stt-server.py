@@ -163,11 +163,14 @@ def load_model(model_key):
 class STTHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
+            import mlx.core as mx
             self._respond(200, {
                 "status": "ok",
                 "model": MODEL_NAME,
                 "ready": True,
                 "load_time_s": round(load_time, 1),
+                "memory_bytes": mx.get_active_memory(),
+                "memory_gb": round(mx.get_active_memory() / 1e9, 2),
             })
         elif self.path == '/':
             self._respond_html()
