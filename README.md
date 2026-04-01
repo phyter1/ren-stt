@@ -9,23 +9,38 @@ Runs on one machine or split across a network: server on your Apple Silicon box,
 
 ## Quick Start
 
+### Client (any Mac) — DMG installer
+
 ```bash
 git clone https://github.com/phyter1/ren-stt.git
 cd ren-stt
-
-# All-in-one (Apple Silicon Mac)
-./install.sh standalone
-
-# Or split across machines:
-# On your Apple Silicon machine:
-./install.sh server
-
-# On any other Mac:
-./install.sh client --server your-server.local
+./build-dmg.sh
+open dist/RenSTT.dmg
 ```
 
-After install, grant **Accessibility permissions** to your terminal app:  
-System Settings → Privacy & Security → Accessibility → add your terminal app.
+Drag **RenSTT** to **Applications**, then open it. First launch:
+- Prompts for STT server URL (localhost or a remote machine)
+- Creates a virtual environment and installs dependencies
+- macOS asks for **Accessibility** and **Microphone** permissions (native dialogs)
+- Registers as a Login Item (starts on boot)
+
+### Server (Apple Silicon)
+
+```bash
+git clone https://github.com/phyter1/ren-stt.git
+cd ren-stt
+./install.sh server
+```
+
+### CLI install (alternative)
+
+```bash
+# All-in-one on Apple Silicon:
+./install.sh standalone
+
+# Client only, pointing at a remote server:
+./install.sh client --server your-server.local
+```
 
 ## Usage
 

@@ -149,6 +149,7 @@ install_client_plist() {
     local plist="$PLIST_DIR/$CLIENT_LABEL.plist"
     local launchd_path
     launchd_path="$(build_launchd_path)"
+    local app_launcher="$REPO_DIR/RenSTT.app/Contents/MacOS/ren-stt"
 
     cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -159,9 +160,7 @@ install_client_plist() {
     <string>$CLIENT_LABEL</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$VENV_PYTHON</string>
-        <string>-u</string>
-        <string>$REPO_DIR/stt-cli.py</string>
+        <string>$app_launcher</string>
     </array>
     <key>WorkingDirectory</key>
     <string>$REPO_DIR</string>
@@ -195,25 +194,23 @@ prompt_permissions() {
     echo "  1. Accessibility — lets the hotkey listener detect keypresses and paste text"
     echo "  2. Microphone    — lets sox record audio"
     echo ""
-    info "Opening System Settings..."
 
-    # Open Accessibility pane
+    # Accessibility
+    info "Opening Accessibility settings..."
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-
     echo ""
-    echo "  Add the Python binary to Accessibility:"
-    echo "  $VENV_PYTHON"
+    echo "  Click +, then add:"
+    echo "  $REPO_DIR/RenSTT.app"
     echo ""
-    echo "  If running from a terminal app (Terminal, iTerm, etc.),"
-    echo "  add that app instead — it covers all child processes."
+    echo "  (It should show up as \"RenSTT\" in the list)"
     echo ""
     read -rp "  Press Enter once Accessibility is granted..."
 
-    # Open Microphone pane
+    # Microphone
+    info "Opening Microphone settings..."
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
-
     echo ""
-    echo "  Ensure your terminal app has Microphone access."
+    echo "  Ensure RenSTT (or your terminal app) has Microphone access."
     echo ""
     read -rp "  Press Enter once Microphone is granted..."
 
@@ -222,6 +219,49 @@ prompt_permissions() {
     launchctl unload "$PLIST_DIR/$CLIENT_LABEL.plist" 2>/dev/null || true
     launchctl load "$PLIST_DIR/$CLIENT_LABEL.plist"
     info "Client restarted."
+}
+
+build_app_bundle() {
+    local app_dir="$REPO_DIR/RenSTT.app"
+    local contents="$app_dir/Contents"
+    local macos="$contents/MacOS"
+
+    info "Building RenSTT.app wrapper..."
+
+    mkdir -p "$macos"
+
+    # Info.plist — makes macOS treat this as a proper app
+    cat > "$contents/Info.plist" <<'PLISTEOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.ren-stt.client</string>
+    <key>CFBundleName</key>
+    <string>RenSTT</string>
+    <key>CFBundleDisplayName</key>
+    <string>Ren STT</string>
+    <key>CFBundleExecutable</key>
+    <string>ren-stt</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Ren STT needs microphone access to record speech for transcription.</string>
+</dict>
+</plist>
+PLISTEOF
+
+    # Launcher script
+    cat > "$macos/ren-stt" <<LAUNCHEOF
+#!/bin/bash
+exec "$VENV_DIR/bin/python3" -u "$REPO_DIR/stt-cli.py"
+LAUNCHEOF
+    chmod +x "$macos/ren-stt"
+
+    info "Built $app_dir"
 }
 
 uninstall() {
@@ -235,6 +275,12 @@ uninstall() {
             info "Removed $label"
         fi
     done
+
+    # Clean up generated app bundle
+    if [[ -d "$REPO_DIR/RenSTT.app" ]]; then
+        rm -rf "$REPO_DIR/RenSTT.app"
+        info "Removed RenSTT.app"
+    fi
 
     echo ""
     info "Services removed."
@@ -320,6 +366,7 @@ case "$MODE" in
         setup_venv
         info "Installing Python dependencies into venv..."
         $VENV_PIP install -q -r "$REPO_DIR/requirements-client.txt"
+        build_app_bundle
         write_config "$SERVER_HOST"
         mkdir -p "$PLIST_DIR"
         install_client_plist
@@ -338,6 +385,7 @@ case "$MODE" in
         info "Installing all Python dependencies into venv..."
         $VENV_PIP install -q -r "$REPO_DIR/requirements-server.txt"
         $VENV_PIP install -q -r "$REPO_DIR/requirements-client.txt"
+        build_app_bundle
         write_config "http://localhost:$SERVER_PORT"
         mkdir -p "$PLIST_DIR"
         install_server_plist
