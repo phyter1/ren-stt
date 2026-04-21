@@ -113,9 +113,16 @@ def show_indicator():
     if not use_indicator:
         return
     try:
+        if getattr(sys, 'frozen', False):
+            # In a frozen bundle, launch the co-bundled stt-indicator executable.
+            # sys.executable is RenSTT; stt-indicator lives in the same MacOS/ dir.
+            indicator_exe = os.path.join(os.path.dirname(sys.executable), 'stt-indicator')
+            cmd = [indicator_exe, '--sensitivity', str(indicator_sensitivity)]
+        else:
+            cmd = [PYTHON_EXE, os.path.join(SCRIPT_DIR, 'stt-indicator.py'),
+                   '--sensitivity', str(indicator_sensitivity)]
         indicator_process = subprocess.Popen(
-            [PYTHON_EXE, os.path.join(SCRIPT_DIR, "stt-indicator.py"),
-             "--sensitivity", str(indicator_sensitivity)],
+            cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

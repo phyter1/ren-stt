@@ -10,7 +10,6 @@ a = Analysis(
     pathex=[REPO],
     datas=[
         (os.path.join(REPO, 'config.py'), '.'),
-        (os.path.join(REPO, 'stt-indicator.py'), '.'),
         (os.path.join(REPO, 'stt-menubar.py'), '.'),
         (os.path.join(REPO, 'stt-server.py'), '.'),
         (os.path.join(REPO, 'config.example.json'), '.'),
@@ -23,8 +22,6 @@ a = Analysis(
         'pynput.keyboard._darwin',
         'pynput._util',
         'pynput._util.darwin',
-        'sounddevice',
-        'numpy',
         'AppKit',
         'Cocoa',
         'Quartz',
@@ -37,7 +34,22 @@ a = Analysis(
     noarchive=False,
 )
 
+b = Analysis(
+    [os.path.join(REPO, 'stt-indicator.py')],
+    pathex=[REPO],
+    hiddenimports=[
+        'sounddevice',
+        'numpy',
+        'AppKit',
+        'Quartz',
+        'CoreFoundation',
+        'objc',
+    ],
+    noarchive=False,
+)
+
 pyz = PYZ(a.pure)
+pyz_indicator = PYZ(b.pure)
 
 exe = EXE(
     pyz,
@@ -52,10 +64,26 @@ exe = EXE(
     target_arch='arm64',
 )
 
+exe_indicator = EXE(
+    pyz_indicator,
+    b.scripts,
+    [],
+    exclude_binaries=True,
+    name='stt-indicator',
+    debug=False,
+    strip=False,
+    upx=False,
+    console=False,
+    target_arch='arm64',
+)
+
 coll = COLLECT(
     exe,
+    exe_indicator,
     a.binaries,
+    b.binaries,
     a.datas,
+    b.datas,
     strip=False,
     upx=False,
     name='RenSTT',
